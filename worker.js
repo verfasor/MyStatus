@@ -1,6 +1,6 @@
 // MyStatus adapted from MyGB: https://github.com/verfasor/MyGB
 // Thanks Sylvia for ideas and initial fork https://departure.blog/
-// Worker.js v1.0.0
+// Worker.js v1.0.1
 
 // Session management
 const SESSION_COOKIE_NAME = 'gb_session';
@@ -177,46 +177,14 @@ function getMarkdownHelpText(value) {
     : 'Supports basic markdown formatting (built-in renderer).';
 }
 
-function sanitizeSiteIntroHtml(input) {
-  if (!input) return '';
+const SITE_INTRO_MAX_LEN = 2000;
 
-  let html = String(input);
-
-  // Remove high-risk tags completely (with contents).
-  html = html
-    .replace(/<\s*(script|style|iframe|object|embed|link|meta)[^>]*>[\s\S]*?<\s*\/\s*\1\s*>/gi, '')
-    .replace(/<\s*(script|style|iframe|object|embed|link|meta)\b[^>]*\/?\s*>/gi, '');
-
-  // Strip inline event handlers and style attributes.
-  html = html
-    .replace(/\son[a-z]+\s*=\s*(".*?"|'.*?'|[^\s>]+)/gi, '')
-    .replace(/\sstyle\s*=\s*(".*?"|'.*?'|[^\s>]+)/gi, '');
-
-  // Allow only a small set of tags.
-  html = html.replace(/<\/?(?!p\b|br\b|strong\b|em\b|a\b|ul\b|ol\b|li\b|code\b)[^>]*>/gi, '');
-
-  // Normalize safe tags (remove unexpected attributes).
-  html = html
-    .replace(/<(p|strong|em|ul|ol|li|code)\b[^>]*>/gi, '<$1>')
-    .replace(/<br\b[^>]*>/gi, '<br>');
-
-  // Keep only safe href values for links.
-  html = html.replace(/<a\b([^>]*)>/gi, (_, attrs) => {
-    const hrefMatch = attrs.match(/\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i);
-    const rawHref = (hrefMatch?.[1] || hrefMatch?.[2] || hrefMatch?.[3] || '').trim();
-
-    // Allow absolute http(s), root-relative, and hash links.
-    const safeHref = rawHref && (
-      isAllowedHttpUrl(rawHref) ||
-      rawHref.startsWith('/') ||
-      rawHref.startsWith('#')
-    ) ? rawHref : '';
-
-    if (!safeHref) return '<a>';
-    return `<a href="${escapeHtml(safeHref)}" rel="nofollow noopener noreferrer">`;
-  });
-
-  return html;
+function validateSiteIntro(raw) {
+  const value = String(raw || '').replace(/\u0000/g, '');
+  if (value.length > SITE_INTRO_MAX_LEN) {
+    return { ok: false, error: `Site intro too long (max ${SITE_INTRO_MAX_LEN} chars)` };
+  }
+  return { ok: true, value };
 }
 
 const CLIENT_COMMON_JS = `
@@ -945,7 +913,7 @@ ${getHead('Settings - ' + sitename, siteIcon, extraStyles + (config.CUSTOM_CSS |
           <div class="form-group">
             <label for="SITE_INTRO">Site Intro</label>
             <textarea id="SITE_INTRO" name="SITE_INTRO" rows="3" style="width: 100%; box-sizing: border-box;">${escapeHtml(config.SITE_INTRO || '')}</textarea>
-            <div class="help-text">Displayed on the home page above the stream. Supports basic HTML.</div>
+            <div class="help-text">Displayed on the home page above the stream. Markdown (same as statuses): ${escapeHtml(getMarkdownHelpText(config.MD_SCRIPT))}</div>
           </div>
           <div class="form-group">
             <label for="SITE_DESCRIPTION">Site Description</label>
@@ -1137,20 +1105,25 @@ ${getHead('Settings - ' + sitename, siteIcon, extraStyles + (config.CUSTOM_CSS |
 // HTML templates
 function getIndexHTML(entries, env, currentHostname) {
   const sitename = env.SITENAME || 'Status';
-  const siteIntro = sanitizeSiteIntroHtml(env.SITE_INTRO || '');
   const useMdScript = isMdScriptEnabled(env.MD_SCRIPT);
+  const siteIntroRaw = env.SITE_INTRO || '';
+  const siteIntroHTML =
+    String(siteIntroRaw).trim() === ''
+      ? ''
+      : `<div class="site-intro${useMdScript ? ' markdown-content' : ''}" style="margin-bottom: 1.5rem; color: var(--text); line-height: 1.6;">${
+          useMdScript ? escapeHtml(siteIntroRaw) : renderStatus(siteIntroRaw)
+        }</div>`;
 
   const entriesHTML = entries.length === 0
     ? `<div class="empty-state"><p>No statuses yet.</p></div>`
     : entries.map(entry => `
-      <a href="/${entry.id}" class="entry-link" aria-label="Open status ${entry.id}">
-        <article class="entry">
-          <div class="entry-content${useMdScript ? ' markdown-content' : ''}">${useMdScript ? escapeHtml(entry.status) : renderStatus(entry.status)}</div>
-          <div class="entry-meta">
-            <span class="entry-date client-date" datetime="${entry.created_at}">${formatDate(entry.created_at)}</span>
-          </div>
-        </article>
-      </a>
+      <article class="entry">
+        <div class="entry-content${useMdScript ? ' markdown-content' : ''}">${useMdScript ? escapeHtml(entry.status) : renderStatus(entry.status)}</div>
+        <div class="entry-meta">
+          <span class="entry-date client-date" datetime="${escapeHtml(entry.created_at)}">${formatDate(entry.created_at)}</span>
+        </div>
+        <a class="entry-link" href="/${entry.id}" aria-label="Open status ${entry.id}"></a>
+      </article>
     `).join('');
     
   const siteIcon = env.SITE_ICON_URL || 'https://static.mighil.com/images/2026/mystatus.webp';
@@ -1241,20 +1214,51 @@ function getIndexHTML(entries, env, currentHostname) {
     .entry {
       margin-bottom: 1rem;
       transition: border-color 0.2s, transform 0.2s, box-shadow 0.2s;
+      position: relative;
     }
-    .entry-link {
-      display: block;
-      color: inherit;
-      text-decoration: none;
-    }
-    .entry-link:hover .entry,
-    .entry-link:focus-visible .entry {
+    .entry:hover {
       border-color: var(--primary);
       box-shadow: 0 8px 24px rgb(0 0 0 / 0.08);
     }
-    .entry-meta { flex: 1; display: flex; flex-direction: column; }
+    /* Full-card target without wrapping content that may contain <a> (invalid nested anchors). */
+    .entry-link {
+      position: absolute;
+      inset: 0;
+      z-index: 1;
+      border-radius: inherit;
+      text-decoration: none;
+    }
+    .entry-content {
+      position: relative;
+      z-index: 2;
+      pointer-events: none;
+    }
+    .entry-content a,
+    .entry-content button,
+    .entry-content input,
+    .entry-content select,
+    .entry-content textarea {
+      position: relative;
+      z-index: 2;
+      pointer-events: auto;
+    }
+    .entry-meta {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      position: relative;
+      z-index: 2;
+      pointer-events: none;
+    }
     .entry-date { color: var(--text-muted); font-size: 0.75rem;}
+    .entry-link:focus-visible {
+      outline: 2px solid var(--primary);
+      outline-offset: 2px;
+    }
     .empty-state { text-align: center; padding: 4rem 2rem; color: var(--text-muted); }
+    .site-intro { font-size: 0.9375rem; }
+    .site-intro p { margin-bottom: 0.75rem; }
+    .site-intro p:last-child { margin-bottom: 0; }
     @media (max-width: 640px) {
       .entry-content { padding-left: 0; margin-top: 1rem; }
     }
@@ -1270,7 +1274,7 @@ ${getHead(sitename, siteIcon, extraStyles + (env.CUSTOM_CSS || ''), extraHead)}
       ${navLinksHTML}
     </header>
 
-    ${siteIntro ? `<div style="margin-bottom: 1.5rem; color: var(--text); line-height: 1.6;">${siteIntro}</div>` : ''}
+    ${siteIntroHTML}
 
     <div class="entries-section">
       <div id="entries-container">
@@ -1302,25 +1306,29 @@ ${getHead(sitename, siteIcon, extraStyles + (env.CUSTOM_CSS || ''), extraHead)}
 
           if (data.success && data.entries.length > 0) {
             data.entries.forEach(entry => {
-              const entryLink = document.createElement('a');
-              entryLink.className = 'entry-link';
-              entryLink.href = '/' + entry.id;
-              entryLink.setAttribute('aria-label', 'Open status ' + entry.id);
-              entryLink.innerHTML =
-                '<article class="entry">' +
-                  '<div class="entry-content' + (useMdScript ? ' markdown-content' : '') + '"></div>' +
-                  '<div class="entry-meta"><span class="entry-date">' + formatDateString(entry.created_at) + '</span></div>' +
-                '</article>';
-              const contentEl = entryLink.querySelector('.entry-content');
+              const article = document.createElement('article');
+              article.className = 'entry';
+              const dt = escapeHtml(String(entry.created_at || ''));
+              article.innerHTML =
+                '<div class="entry-content' + (useMdScript ? ' markdown-content' : '') + '"></div>' +
+                '<div class="entry-meta">' +
+                  '<span class="entry-date client-date" datetime="' + dt + '">' + formatDateString(entry.created_at) + '</span>' +
+                '</div>';
+              const overlay = document.createElement('a');
+              overlay.className = 'entry-link';
+              overlay.href = '/' + entry.id;
+              overlay.setAttribute('aria-label', 'Open status ' + entry.id);
+              article.appendChild(overlay);
+              const contentEl = article.querySelector('.entry-content');
               if (useMdScript) {
                 contentEl.textContent = entry.status || '';
               } else {
                 contentEl.innerHTML = entry.rendered || '';
               }
               if (useMdScript && typeof window.renderMarkdownContent === 'function') {
-                window.renderMarkdownContent(entryLink);
+                window.renderMarkdownContent(article);
               }
-              entriesContainer.appendChild(entryLink);
+              entriesContainer.appendChild(article);
             });
 
             if (data.nextCursor) {
@@ -2023,9 +2031,23 @@ function formatDate(dateString) {
   });
 }
 
+/** Atom `<title>`: plain text from first line, or `Status #id` when the post leads with a markdown image. */
+function getAtomEntryTitle(entry) {
+  const firstLine = String(entry.status || '').split('\n')[0].trim();
+  if (!firstLine) {
+    return escapeHtml(`Status #${entry.id}`);
+  }
+  if (/^\s*!\[[^\]]*\]\(/.test(firstLine) || /^\s*<img\b/i.test(firstLine)) {
+    return escapeHtml(`Status #${entry.id}`);
+  }
+  const display = firstLine.length > 60 ? firstLine.slice(0, 60) + '\u2026' : firstLine;
+  return escapeHtml(display);
+}
+
 // RSS feed
 function getFeedXML(entries, config) {
   const siteUrl = config.CANONICAL_URL || config.API_URL || '';
+  const feedBaseUrl = String(siteUrl).replace(/\/$/, '');
   const sitename = config.SITENAME || 'Status';
 
   // Use the most recent entry date as the feed's updated timestamp, or now if empty
@@ -2047,7 +2069,7 @@ function getFeedXML(entries, config) {
     const tagTime = iso.slice(11, 19).replace(/:/g, '-'); // e.g. 17-53-48
     const entryId = `tag:${hostname},${tagDate}:${tagTime}`;
 
-    const entryLink = `${siteUrl}/`;
+    const entryLink = feedBaseUrl ? `${feedBaseUrl}/${entry.id}` : `/${entry.id}`;
 
     // Render markdown status to HTML, then entity-escape for XML inclusion
     const renderedContent = renderStatus(entry.status);
@@ -2057,9 +2079,7 @@ function getFeedXML(entries, config) {
       .replace(/>/g, '&gt;')
       .replace(/"/g, '&quot;');
 
-    // Use first line of status (up to 60 chars) as the entry title & add ellipsis
-    const firstLine = entry.status.split('\n')[0];
-    const entryTitle = escapeHtml(firstLine.length > 60 ? firstLine.slice(0, 60) + '…' : firstLine);
+    const entryTitle = getAtomEntryTitle(entry);
 
     return `  <entry>
     <title>${entryTitle}</title>
@@ -2070,13 +2090,17 @@ function getFeedXML(entries, config) {
   </entry>`;
   }).join('\n');
 
+  const homeLink = feedBaseUrl ? `${feedBaseUrl}/` : '/';
+  const selfLink = feedBaseUrl ? `${feedBaseUrl}/feed.xml` : '/feed.xml';
+  const feedId = feedBaseUrl ? `${feedBaseUrl}/` : '/';
+
   return `<?xml version="1.0" encoding="utf-8"?>
 <feed xmlns="http://www.w3.org/2005/Atom">
   <title>${escapeHtml(sitename)}</title>
-  <link href="${escapeHtml(siteUrl + '/')}"/>
-  <link rel="self" href="${escapeHtml(siteUrl + '/feed.xml')}"/>
+  <link href="${escapeHtml(homeLink)}"/>
+  <link rel="self" href="${escapeHtml(selfLink)}"/>
   <updated>${updated}</updated>
-  <id>${escapeHtml(siteUrl + '/')}</id>
+  <id>${escapeHtml(feedId)}</id>
 ${entryItems}
 </feed>`;
 }
@@ -2275,9 +2299,17 @@ export default {
             });
           }
 
+          const siteIntroValidation = validateSiteIntro(formData.get('SITE_INTRO'));
+          if (!siteIntroValidation.ok) {
+            return new Response(JSON.stringify({ success: false, error: siteIntroValidation.error }), {
+              status: 400,
+              headers: { 'Content-Type': 'application/json' }
+            });
+          }
+
           const settings = {
             SITENAME: formData.get('SITENAME') || 'Status',
-            SITE_INTRO: sanitizeSiteIntroHtml(formData.get('SITE_INTRO') || ''),
+            SITE_INTRO: siteIntroValidation.value,
             SITE_DESCRIPTION: formData.get('SITE_DESCRIPTION') || '',
             SITE_ICON_URL: formData.get('SITE_ICON_URL') || '',
             SITE_COVER_IMAGE_URL: formData.get('SITE_COVER_IMAGE_URL') || '',
