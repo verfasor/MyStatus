@@ -81,6 +81,17 @@ Example CSS snippet:
 </style>
 ```
 
+### Experimental: R2 media (optional)
+
+![](https://static.mighil.com/images/2026/mystatus-r2-binding-step.webp)
+
+1. [Create an R2 bucket](https://developers.cloudflare.com/r2/get-started/) and bind it to the Worker with binding name **`MEDIA`**.
+2. In the admin nav, open **Media** (`/admin/media`): upload files, copy the public URL, or delete objects from the bucket.
+3. Files are served at **`/media/<filename>`** (one URL path segment; names are normalized to letters, digits, `.`, `_`, and `-`).
+4. In statuses, use same-origin paths such as **`![](/media/photo.png)`** or **`[label](/media/doc.pdf)`**. The built-in renderer allows these `/media/...` paths alongside `http(s):` URLs. With `MD_SCRIPT=true`, you can also use full `https://` URLs to your site.
+
+Upload limits (experimental): up to **15 MB** per file; types allowed include common raster images (not SVG), `video/mp4`, `video/webm`, `audio/mpeg` / `mp3` / `wav` / `webm`, and `application/pdf`.
+
 ## Credits
 
 This direction was [Sylvia](https://departure.blog/)'s idea, and she cleaned it up for her use case (kudos to her). I reviewed it and am now releasing a version everyone can use. Sylvia also added markdown support for statuses, meaning you can write status posts directly in Markdown.
