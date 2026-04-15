@@ -1,6 +1,6 @@
 // MyStatus adapted from MyGB: https://github.com/verfasor/MyGB
 // Thanks Sylvia for ideas and initial fork https://departure.blog/
-// Worker.js v1.0.2
+// Worker.js v1.0.3
 
 // Session management
 const SESSION_COOKIE_NAME = 'gb_session';
@@ -10,6 +10,98 @@ const MARKED_BROWSER_SCRIPT_URL = 'https://cdn.jsdelivr.net/npm/marked/marked.mi
 
 /** Page size for index first paint, Load more, and `/api/entries` (embed uses the same API). */
 const ENTRIES_PAGE_LIMIT = 10;
+
+/** Experimental R2 public media at `/media/<key>` (bind bucket as `MEDIA` in wrangler). */
+const MEDIA_KEY_MAX = 120;
+const MEDIA_LIST_LIMIT = 500;
+const MEDIA_UPLOAD_MAX_BYTES = 15 * 1024 * 1024;
+
+function getMediaBucket(env) {
+  return env.MEDIA || null;
+}
+
+function isValidMediaObjectKey(key) {
+  if (!key || typeof key !== 'string') return false;
+  if (key.length < 1 || key.length > MEDIA_KEY_MAX) return false;
+  return /^[a-zA-Z0-9._-]+$/.test(key);
+}
+
+function inferExtensionFromMime(mime) {
+  const m = String(mime || '').toLowerCase();
+  const map = {
+    'image/jpeg': '.jpg',
+    'image/jpg': '.jpg',
+    'image/png': '.png',
+    'image/gif': '.gif',
+    'image/webp': '.webp',
+    'video/mp4': '.mp4',
+    'video/webm': '.webm',
+    'audio/mpeg': '.mp3',
+    'audio/mp3': '.mp3',
+    'audio/wav': '.wav',
+    'audio/webm': '.webm',
+    'application/pdf': '.pdf'
+  };
+  return map[m] || '';
+}
+
+function mimeFromFilename(filename) {
+  const lower = String(filename || '').toLowerCase();
+  if (lower.endsWith('.png')) return 'image/png';
+  if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
+  if (lower.endsWith('.gif')) return 'image/gif';
+  if (lower.endsWith('.webp')) return 'image/webp';
+  if (lower.endsWith('.mp4')) return 'video/mp4';
+  if (lower.endsWith('.webm')) return 'video/webm';
+  if (lower.endsWith('.mp3')) return 'audio/mpeg';
+  if (lower.endsWith('.wav')) return 'audio/wav';
+  if (lower.endsWith('.pdf')) return 'application/pdf';
+  return '';
+}
+
+function contentTypeFromMediaKey(key) {
+  return mimeFromFilename(key) || 'application/octet-stream';
+}
+
+function isAllowedUploadMime(mime) {
+  const m = String(mime || '').toLowerCase();
+  if (m === 'image/jpg') return true;
+  if (m.startsWith('image/')) {
+    return ['image/jpeg', 'image/png', 'image/gif', 'image/webp'].includes(m);
+  }
+  if (m === 'video/mp4' || m === 'video/webm') return true;
+  if (m === 'audio/mpeg' || m === 'audio/mp3' || m === 'audio/wav' || m === 'audio/webm') return true;
+  if (m === 'application/pdf') return true;
+  return false;
+}
+
+function normalizeMediaObjectKeyFromFilename(filename) {
+  const base = String(filename || '').replace(/^.*[/\\\\]/, '').trim();
+  let key = base.replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/-+/g, '-').replace(/^-+|-+$/g, '');
+  if (!key || key === '.' || key === '..') return '';
+  if (key.length > MEDIA_KEY_MAX) {
+    const dot = key.lastIndexOf('.');
+    if (dot > 0 && key.length - dot <= 10) {
+      const ext = key.slice(dot);
+      const maxStem = MEDIA_KEY_MAX - ext.length;
+      key = (maxStem > 0 ? key.slice(0, dot).slice(0, maxStem) : 'file') + ext;
+    } else {
+      key = key.slice(0, MEDIA_KEY_MAX);
+    }
+  }
+  return isValidMediaObjectKey(key) ? key : '';
+}
+
+/** Root-relative R2 media paths allowed in markdown (same origin). */
+function isSafeRelativeMediaUrl(url) {
+  const m = String(url || '').trim().match(/^\/media\/([^/?#]+)$/);
+  if (!m) return false;
+  try {
+    return isValidMediaObjectKey(decodeURIComponent(m[1]));
+  } catch (e) {
+    return false;
+  }
+}
 
 // Login rate limiting
 const LOGIN_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
@@ -382,7 +474,7 @@ function renderStatus(text) {
         if (m.index > last) out.push({ type: 'raw', value: str.slice(last, m.index) });
         const alt = m[1];
         const url = m[2];
-        if (isValidUrl(url)) {
+        if (isValidUrl(url) || isSafeRelativeMediaUrl(url)) {
           out.push({ type: 'html', value: `<img src="${escapeHtml(url)}" alt="${escapeHtml(alt)}">` });
         } else {
           out.push({ type: 'raw', value: m[0] });
@@ -392,9 +484,9 @@ function renderStatus(text) {
       if (last < str.length) out.push({ type: 'raw', value: str.slice(last) });
     });
 
-    // Markdown links with nested formatting: [text](url)
+    // Markdown links with nested formatting: [text](url) — http(s) or /media/... for R2
     processTokens((str, out) => {
-      const re = /\[([^\]]+)\]\((https?:\/\/[^\s]+)\)/g; // Handle URLs with special characters
+      const re = /\[([^\]]+)\]\((https?:\/\/[^\s]+|\/media\/[a-zA-Z0-9._-]+)\)/g;
       let last = 0, m;
       while ((m = re.exec(str)) !== null) {
         if (m.index > last) out.push({ type: 'raw', value: str.slice(last, m.index) });
@@ -407,11 +499,14 @@ function renderStatus(text) {
           .replace(/\*\*(.*?)\*\*/g, (_, m) => `<strong>${escapeHtml(m)}</strong>`)  // Bold
           .replace(/\*(.*?)\*/g, (_, m) => `<em>${escapeHtml(m)}</em>`);            // Italic
 
-        // Only add the <a> tag if it's a valid URL
-        out.push({
-          type: 'html',
-          value: `<a href="${escapeHtml(url)}" rel="nofollow noopener noreferrer">${processedLinkText}</a>`
-        });
+        if (isValidUrl(url) || isSafeRelativeMediaUrl(url)) {
+          out.push({
+            type: 'html',
+            value: `<a href="${escapeHtml(url)}" rel="nofollow noopener noreferrer">${processedLinkText}</a>`
+          });
+        } else {
+          out.push({ type: 'raw', value: m[0] });
+        }
 
         last = re.lastIndex;
       }
@@ -639,10 +734,9 @@ const COMMON_CSS = `
       background: var(--primary);
       color: white;
       border: none;
-      padding: 0.75rem 1.5rem;
+      padding: 0.5rem 1rem;
       border-radius: 0.5rem;
       cursor: pointer;
-      font-size: 1rem;
       font-weight: 600;
       transition: background-color 0.15s;
     }
@@ -757,6 +851,7 @@ function getAdminHeader(activePage) {
         <a href="/admin" class="${activePage === 'post' ? 'active' : ''}">Post</a>
         <a href="/admin/entries" class="${activePage === 'entries' ? 'active' : ''}">Entries</a>
         <a href="/admin/embed" class="${activePage === 'embed' ? 'active' : ''}">Embed</a>
+        <a href="/admin/media" class="${activePage === 'media' ? 'active' : ''}">Media</a>
         <a href="/admin/settings" class="${activePage === 'settings' ? 'active' : ''}">Settings</a>
         <a href="/" target="_blank">View Site</a>
         <a href="#" onclick="logout(); return false;" class="logout">Logout</a>
@@ -1610,6 +1705,167 @@ ${getHead('Embed - ' + sitename, siteIcon, extraStyles + (env.CUSTOM_CSS || ''),
 </html>`;
 }
 
+function getAdminMediaHTML(env, objects, mediaConfigured, publicBase) {
+  const sitename = env.SITENAME || 'Status';
+  const siteIcon = env.SITE_ICON_URL || 'https://static.mighil.com/images/2026/mystatus.webp';
+  const base = String(publicBase || '').replace(/\/$/, '');
+
+  const rowsHTML = !mediaConfigured
+    ? ''
+    : objects.length === 0
+      ? '<div class="empty-state">No files in the bucket yet. Upload something below.</div>'
+      : `
+      <div class="table-responsive">
+        <table class="entries-table">
+          <thead>
+            <tr>
+              <th>Key</th>
+              <th>Size</th>
+              <th>Uploaded</th>
+              <th>URL</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${objects.map(o => {
+    const key = escapeHtml(o.key);
+    const relPath = '/media/' + encodeURIComponent(o.key);
+    const absUrl = base ? escapeHtml(base + relPath) : escapeHtml(relPath);
+    const sz = o.size != null ? escapeHtml(formatByteSize(o.size)) : '';
+    const up = o.uploaded != null ? escapeHtml(formatUploadedDate(o.uploaded)) : '';
+    return `
+              <tr>
+                <td><code>${key}</code></td>
+                <td class="text-muted text-sm">${sz}</td>
+                <td class="text-muted text-sm">${up}</td>
+                <td><a href="${relPath}" target="_blank" rel="noopener noreferrer">Open</a></td>
+                <td class="entry-actions">
+                  <button type="button" class="btn-edit media-copy" data-url="${absUrl}">Copy URL</button>
+                  <button type="button" class="btn-delete media-delete" data-key="${key}">Delete</button>
+                </td>
+              </tr>`;
+  }).join('')}
+          </tbody>
+        </table>
+      </div>`;
+
+  const setupHTML = !mediaConfigured
+    ? `<div class="message" style="margin-bottom:1rem;padding:1rem;border-radius:0.5rem;border:1px solid var(--border);background:var(--card-bg);">
+        <strong>Experimental:</strong> bind an R2 bucket to this Worker as <code>MEDIA</code> (see <code>wrangler.toml.example</code> in the repo), redeploy, then reload this page.
+      </div>`
+    : `<p class="help-text" style="margin-bottom:1rem;">Public URL pattern: <code>/media/&lt;filename&gt;</code>. Use in statuses, e.g. <code>![](/media/photo.png)</code> or <code>[label](/media/doc.pdf)</code>. Same-origin URLs work with the built-in renderer; absolute URLs need <code>https://</code>.</p>
+      <form id="media-upload-form" enctype="multipart/form-data" style="margin-bottom:1.5rem;padding:1rem;border:1px solid var(--border);border-radius:0.5rem;">
+        <label for="media-file" style="display:block;margin-bottom:0.5rem;font-weight:600;">Upload file</label>
+        <input type="file" id="media-file" name="file" required accept="image/jpeg,image/png,image/gif,image/webp,video/mp4,video/webm,audio/mpeg,audio/wav,audio/webm,application/pdf,.mp3,.pdf">
+        <button type="submit" id="media-upload-btn" style="margin-top:0.75rem;width:auto;">Upload</button>
+      </form>`;
+
+  const extraStyles = `
+    .table-responsive { overflow-x: auto; }
+    .entries-table { width: 100%; border-collapse: collapse; font-size: 0.875rem; }
+    .entries-table th {
+      text-align: left;
+      padding: 1rem;
+      background: var(--card-bg);
+      color: var(--text-muted);
+      font-weight: 600;
+      border-bottom: 1px solid var(--border);
+    }
+    .entries-table td { padding: 1rem; border-bottom: 1px solid var(--border); vertical-align: top; }
+    .entries-table tr:last-child td { border-bottom: none; }
+    .entry-actions { white-space: nowrap; }
+    .btn-edit { display: inline-block; text-decoration: none; background: #eff6ff; color: #1d4ed8; border: 1px solid #bfdbfe; padding: 0.25rem 0.75rem; border-radius: 0.375rem; cursor: pointer; font-size: 0.75rem; font-weight: 600; margin-right: 0.5rem; border: 1px solid #bfdbfe; }
+    .btn-edit:hover { background: #dbeafe; }
+    .btn-delete { background: #fef2f2; color: #dc2626; border: 1px solid #fecaca; padding: 0.25rem 0.75rem; border-radius: 0.375rem; cursor: pointer; font-size: 0.75rem; font-weight: 600; }
+    .btn-delete:hover { background: #fee2e2; }
+    .empty-state { padding: 2rem; text-align: center; color: var(--text-muted); font-style: italic; }
+    .help-text { font-size: 0.875rem; color: var(--text-muted); }
+  `;
+
+  return `<!DOCTYPE html>
+<html lang="en">
+${getHead('Media - ' + sitename, siteIcon, extraStyles + (env.CUSTOM_CSS || ''), '', true)}
+<body>
+  <div class="container">
+    ${getAdminHeader('media')}
+    <div id="message-container"></div>
+    <div class="card">
+      <div style="padding: 1.5rem; border-bottom: 1px solid var(--border);">
+        <h2 style="font-size: 1.125rem; font-weight: 600; margin: 0;">Media (R2)</h2>
+      </div>
+      <div style="padding: 1.5rem;">
+        ${setupHTML}
+        ${rowsHTML}
+      </div>
+    </div>
+  </div>
+  <script>
+    document.querySelectorAll('.media-copy').forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        var u = this.getAttribute('data-url');
+        if (u) navigator.clipboard.writeText(u).then(function() {
+          var c = document.getElementById('message-container');
+          if (c) c.innerHTML = '<div class="message success">Copied URL</div>';
+          setTimeout(function() { if (c) c.innerHTML = ''; }, 2000);
+        });
+      });
+    });
+    document.querySelectorAll('.media-delete').forEach(function(btn) {
+      btn.addEventListener('click', async function() {
+        var key = this.getAttribute('data-key');
+        if (!key || !confirm('Delete ' + key + '?')) return;
+        try {
+          var fd = new FormData();
+          fd.set('key', key);
+          var res = await fetch('/api/media/delete', { method: 'POST', body: fd });
+          var j = await res.json();
+          if (j.success) location.reload();
+          else alert(j.error || 'Delete failed');
+        } catch (e) {
+          alert('Delete failed');
+        }
+      });
+    });
+    var mform = document.getElementById('media-upload-form');
+    if (mform) {
+      mform.addEventListener('submit', async function(e) {
+        e.preventDefault();
+        var btn = document.getElementById('media-upload-btn');
+        var mc = document.getElementById('message-container');
+        var fd = new FormData(mform);
+        btn.disabled = true;
+        btn.textContent = 'Uploading...';
+        try {
+          var res = await fetch('/api/media/upload', { method: 'POST', body: fd });
+          var j = await res.json();
+          if (j.success) {
+            if (mc) mc.innerHTML = '<div class="message success">Uploaded: ' + (j.url || '') + '</div>';
+            mform.reset();
+            setTimeout(function() { location.reload(); }, 800);
+          } else {
+            if (mc) mc.innerHTML = '<div class="message error">' + (j.error || 'Upload failed') + '</div>';
+          }
+        } catch (err) {
+          if (mc) mc.innerHTML = '<div class="message error">Upload failed</div>';
+        } finally {
+          btn.disabled = false;
+          btn.textContent = 'Upload';
+        }
+      });
+    }
+    async function logout() {
+      try {
+        await fetch('/logout', { method: 'POST' });
+        window.location.href = '/login';
+      } catch (error) {
+        window.location.href = '/login';
+      }
+    }
+  </script>
+</body>
+</html>`;
+}
+
 // Post a new status page
 function getAdminPostHTML(env) {
   const sitename = env.SITENAME || 'Status';
@@ -2102,6 +2358,42 @@ function formatDate(dateString) {
   });
 }
 
+/** R2 object `uploaded` (Date, ms, or ISO string) -> same display as status dates. */
+function formatUploadedDate(uploaded) {
+  if (uploaded == null || uploaded === '') return '';
+  let d;
+  if (uploaded instanceof Date) {
+    d = uploaded;
+  } else if (typeof uploaded === 'number') {
+    d = new Date(uploaded);
+  } else {
+    d = new Date(String(uploaded));
+  }
+  if (isNaN(d.getTime())) return '';
+  return formatDate(d.toISOString());
+}
+
+/** Bytes -> short human string (B, KB, MB, GB). */
+function formatByteSize(bytes) {
+  const n = Number(bytes);
+  if (!Number.isFinite(n) || n < 0) return '';
+  const k = 1024;
+  if (n < k) return Math.round(n) + ' B';
+  if (n < k * k) {
+    const v = n / k;
+    const t = Math.round(v * 10) / 10;
+    return (t % 1 === 0 ? String(Math.round(t)) : t.toFixed(1)) + ' KB';
+  }
+  if (n < k * k * k) {
+    const v = n / (k * k);
+    const t = Math.round(v * 10) / 10;
+    return (t % 1 === 0 ? String(Math.round(t)) : t.toFixed(1)) + ' MB';
+  }
+  const v = n / (k * k * k);
+  const t = Math.round(v * 10) / 10;
+  return (t % 1 === 0 ? String(Math.round(t)) : t.toFixed(1)) + ' GB';
+}
+
 /** Atom `<title>`: plain text from first line, or `Status #id` when the post leads with a markdown image. */
 function getAtomEntryTitle(entry) {
   const firstLine = String(entry.status || '').split('\n')[0].trim();
@@ -2254,6 +2546,36 @@ export default {
             'Cache-Control': 'public, max-age=300, s-maxage=300'
           }
         });
+      }
+
+      // Public R2 media: GET|HEAD /media/<key>
+      const mediaPathMatch = path.match(/^\/media\/([^/]+)$/);
+      if (mediaPathMatch && (request.method === 'GET' || request.method === 'HEAD')) {
+        let rawKey;
+        try {
+          rawKey = decodeURIComponent(mediaPathMatch[1]);
+        } catch (e) {
+          return new Response('Bad Request', { status: 400 });
+        }
+        if (!isValidMediaObjectKey(rawKey)) {
+          return new Response('Bad Request', { status: 400 });
+        }
+        const mediaBucket = getMediaBucket(env);
+        if (!mediaBucket) {
+          return new Response('Media not configured', { status: 503 });
+        }
+        const obj = await mediaBucket.get(rawKey);
+        if (!obj) {
+          return new Response('Not Found', { status: 404 });
+        }
+        const ct = obj.httpMetadata?.contentType || contentTypeFromMediaKey(rawKey);
+        const mediaHeaders = new Headers();
+        mediaHeaders.set('Content-Type', ct);
+        mediaHeaders.set('Cache-Control', 'public, max-age=3600');
+        if (request.method === 'HEAD') {
+          return new Response(null, { status: 200, headers: mediaHeaders });
+        }
+        return new Response(obj.body, { status: 200, headers: mediaHeaders });
       }
 
       // Public API: entries (read-only, serves pre-rendered HTML for load-more)
@@ -2436,6 +2758,80 @@ export default {
             headers: { 'Content-Type': 'application/json' }
           });
         }
+
+        if (path === '/api/media/upload' && request.method === 'POST') {
+          const mediaBucket = getMediaBucket(env);
+          if (!mediaBucket) {
+            return new Response(JSON.stringify({ success: false, error: 'R2 bucket MEDIA is not bound' }), {
+              status: 503,
+              headers: { 'Content-Type': 'application/json' }
+            });
+          }
+          const uploadForm = await request.formData();
+          const uploadFile = uploadForm.get('file');
+          if (!uploadFile || typeof uploadFile.arrayBuffer !== 'function') {
+            return new Response(JSON.stringify({ success: false, error: 'Missing file' }), {
+              status: 400,
+              headers: { 'Content-Type': 'application/json' }
+            });
+          }
+          const uploadSize = uploadFile.size != null ? uploadFile.size : 0;
+          if (uploadSize > MEDIA_UPLOAD_MAX_BYTES) {
+            return new Response(JSON.stringify({ success: false, error: 'File too large (max 15 MB)' }), {
+              status: 400,
+              headers: { 'Content-Type': 'application/json' }
+            });
+          }
+          let uploadMime = String(uploadFile.type || '').toLowerCase();
+          if (!uploadMime) uploadMime = mimeFromFilename(uploadFile.name || '');
+          if (!uploadMime) uploadMime = 'application/octet-stream';
+          if (!isAllowedUploadMime(uploadMime)) {
+            return new Response(JSON.stringify({ success: false, error: 'File type not allowed' }), {
+              status: 400,
+              headers: { 'Content-Type': 'application/json' }
+            });
+          }
+          let objectKey = normalizeMediaObjectKeyFromFilename(uploadFile.name || '');
+          if (!objectKey) {
+            const ext = inferExtensionFromMime(uploadMime) || '';
+            objectKey = 'upload-' + crypto.randomUUID().replace(/-/g, '').slice(0, 16) + ext;
+          }
+          if (!isValidMediaObjectKey(objectKey)) {
+            return new Response(JSON.stringify({ success: false, error: 'Invalid filename' }), {
+              status: 400,
+              headers: { 'Content-Type': 'application/json' }
+            });
+          }
+          const uploadBody = await uploadFile.arrayBuffer();
+          await mediaBucket.put(objectKey, uploadBody, { httpMetadata: { contentType: uploadMime } });
+          const mediaPublicPath = '/media/' + encodeURIComponent(objectKey);
+          return new Response(JSON.stringify({ success: true, url: mediaPublicPath, key: objectKey }), {
+            headers: { 'Content-Type': 'application/json' }
+          });
+        }
+
+        if (path === '/api/media/delete' && request.method === 'POST') {
+          const delBucket = getMediaBucket(env);
+          if (!delBucket) {
+            return new Response(JSON.stringify({ success: false, error: 'R2 bucket MEDIA is not bound' }), {
+              status: 503,
+              headers: { 'Content-Type': 'application/json' }
+            });
+          }
+          const delForm = await request.formData();
+          const rawDelKey = delForm.get('key');
+          const delKey = typeof rawDelKey === 'string' ? rawDelKey.trim() : '';
+          if (!isValidMediaObjectKey(delKey)) {
+            return new Response(JSON.stringify({ success: false, error: 'Invalid key' }), {
+              status: 400,
+              headers: { 'Content-Type': 'application/json' }
+            });
+          }
+          await delBucket.delete(delKey);
+          return new Response(JSON.stringify({ success: true }), {
+            headers: { 'Content-Type': 'application/json' }
+          });
+        }
       }
 
       // Login routes
@@ -2564,6 +2960,25 @@ export default {
           // Use configured API_URL or fallback to current origin
           const apiUrl = config.API_URL ? config.API_URL.replace(/\/$/, '') : url.origin;
           return new Response(getEmbedHTML(config, apiUrl), {
+            headers: { 'Content-Type': 'text/html' }
+          });
+        }
+
+        if (path === '/admin/media') {
+          const mediaBucket = getMediaBucket(env);
+          let mediaObjects = [];
+          if (mediaBucket) {
+            try {
+              const listed = await mediaBucket.list({ limit: MEDIA_LIST_LIMIT });
+              mediaObjects = (listed.objects || []).slice().sort(function(a, b) {
+                return String(b.uploaded || '').localeCompare(String(a.uploaded || ''));
+              });
+            } catch (e) {
+              console.error('R2 list failed', e);
+            }
+          }
+          const mediaPublicBase = (config.CANONICAL_URL || config.API_URL || url.origin).replace(/\/$/, '');
+          return new Response(getAdminMediaHTML(config, mediaObjects, !!mediaBucket, mediaPublicBase), {
             headers: { 'Content-Type': 'text/html' }
           });
         }
