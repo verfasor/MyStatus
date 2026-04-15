@@ -1,6 +1,6 @@
 // MyStatus adapted from MyGB: https://github.com/verfasor/MyGB
 // Thanks Sylvia for ideas and initial fork https://departure.blog/
-// Worker.js v1.0.3
+// Worker.js v1.0.3b
 
 // Session management
 const SESSION_COOKIE_NAME = 'gb_session';
@@ -2403,7 +2403,24 @@ function getAtomEntryTitle(entry) {
   if (/^\s*!\[[^\]]*\]\(/.test(firstLine) || /^\s*<img\b/i.test(firstLine)) {
     return escapeHtml(`Status #${entry.id}`);
   }
-  const display = firstLine.length > 60 ? firstLine.slice(0, 60) + '\u2026' : firstLine;
+  const plainText = firstLine
+    // Markdown images -> keep alt text only.
+    .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '$1')
+    // Markdown links -> keep link text only.
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1')
+    // Inline code -> keep code text only.
+    .replace(/`([^`]+)`/g, '$1')
+    // Strip HTML tags if present.
+    .replace(/<[^>]*>/g, '')
+    // Remove common markdown markers.
+    .replace(/(\*\*|__|\*|_|~~|#+|>)/g, '')
+    // Collapse whitespace.
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!plainText) {
+    return escapeHtml(`Status #${entry.id}`);
+  }
+  const display = plainText.length > 60 ? plainText.slice(0, 60) + '\u2026' : plainText;
   return escapeHtml(display);
 }
 
