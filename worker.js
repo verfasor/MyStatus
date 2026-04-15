@@ -1,12 +1,15 @@
 // MyStatus adapted from MyGB: https://github.com/verfasor/MyGB
 // Thanks Sylvia for ideas and initial fork https://departure.blog/
-// Worker.js v1.0.1
+// Worker.js v1.0.2
 
 // Session management
 const SESSION_COOKIE_NAME = 'gb_session';
 const SESSION_DURATION = 7 * 24 * 60 * 60 * 1000; // 7 days
 const SESSION_FUTURE_SKEW_MS = 60 * 1000; // 1 minute clock skew allowance
 const MARKED_BROWSER_SCRIPT_URL = 'https://cdn.jsdelivr.net/npm/marked/marked.min.js';
+
+/** Page size for index first paint, Load more, and `/api/entries` (embed uses the same API). */
+const ENTRIES_PAGE_LIMIT = 10;
 
 // Login rate limiting
 const LOGIN_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
@@ -1280,7 +1283,7 @@ ${getHead(sitename, siteIcon, extraStyles + (env.CUSTOM_CSS || ''), extraHead)}
       <div id="entries-container">
         ${entriesHTML}
       </div>
-      <div id="load-more-container" style="text-align: center; margin-top: 2rem; display: ${entries.length >= 20 ? 'block' : 'none'};">
+      <div id="load-more-container" style="text-align: center; margin-top: 2rem; display: ${entries.length >= ENTRIES_PAGE_LIMIT ? 'block' : 'none'};">
         <button id="load-more-btn" style="background: var(--card-bg); color: var(--text); border: 1px solid var(--border); padding: 0.5rem 1rem; border-radius: 0.5rem; cursor: pointer; font-size: 0.875rem;" data-cursor="${entries.length > 0 ? entries[entries.length - 1].id : ''}">Load More</button>
       </div>
     </div>
@@ -1923,37 +1926,95 @@ function getClientScript(env, requestUrl) {
   };
 
   GuestbookWidget.prototype.render = function() {
-    this.container.innerHTML = '<div class="gb-widget"><div class="gb-entries"><div class="gb-entries-list"></div></div></div>';
+    this.nextCursor = null;
+    this.container.innerHTML =
+      '<div class="gb-widget">' +
+        '<div class="gb-entries">' +
+          '<div class="gb-entries-list"></div>' +
+          '<div class="gb-load-more-wrap" style="text-align:center;margin-top:1rem;display:none;">' +
+            '<button type="button" class="gb-load-more-btn">Load more</button>' +
+          '</div>' +
+        '</div>' +
+      '</div>';
+    var self = this;
+    var btn = this.container.querySelector('.gb-load-more-btn');
+    if (btn) {
+      btn.addEventListener('click', function() { self.loadMoreEntries(); });
+    }
+  };
+
+  GuestbookWidget.prototype.fetchEntriesPage = function(cursor) {
+    var q = cursor != null && cursor !== '' ? ('?cursor=' + encodeURIComponent(String(cursor))) : '';
+    return fetch(this.apiUrl + '/api/entries' + q).then(function(r) { return r.json(); });
+  };
+
+  GuestbookWidget.prototype.appendEntryArticles = function(entries) {
+    var list = this.container.querySelector('.gb-entries-list');
+    if (!list || !entries || !entries.length) return;
+    var self = this;
+    var html = entries.map(function(entry) {
+      return '<article class="gb-entry">' +
+        '<div class="gb-entry-content">' + self.renderEntryContent(entry) + '</div>' +
+        '<div class="gb-entry-meta"><span class="gb-entry-date">' + self.formatDate(entry.created_at) + '</span></div>' +
+      '</article>';
+    }).join('');
+    list.insertAdjacentHTML('beforeend', html);
+  };
+
+  GuestbookWidget.prototype.setLoadMoreVisible = function(visible) {
+    var wrap = this.container.querySelector('.gb-load-more-wrap');
+    if (wrap) wrap.style.display = visible ? 'block' : 'none';
   };
 
   GuestbookWidget.prototype.loadEntries = async function() {
-    const entriesList = this.container.querySelector('.gb-entries-list');
+    var entriesList = this.container.querySelector('.gb-entries-list');
     if (!entriesList) return;
-    
+
     entriesList.innerHTML = '<div class="gb-loading">Loading...</div>';
+    this.setLoadMoreVisible(false);
+    this.nextCursor = null;
 
     try {
-      const response = await fetch(this.apiUrl + '/api/entries');
-      const result = await response.json();
-
+      var result = await this.fetchEntriesPage(null);
       if (result.success && result.entries) {
+        entriesList.innerHTML = '';
         if (result.entries.length === 0) {
           entriesList.innerHTML = '<div class="gb-no-entries">No statuses yet.</div>';
         } else {
-          entriesList.innerHTML = result.entries.map(entry => \`
-            <article class="gb-entry">
-              <div class="gb-entry-content">\${this.renderEntryContent(entry)}</div>
-              <div class="gb-entry-meta">
-                <span class="gb-entry-date">\${this.formatDate(entry.created_at)}</span>
-              </div>
-            </article>
-          \`).join('');
+          this.appendEntryArticles(result.entries);
+          this.nextCursor = result.nextCursor != null ? result.nextCursor : null;
+          this.setLoadMoreVisible(!!this.nextCursor);
         }
       } else {
         entriesList.innerHTML = '<div class="gb-error">Failed to load statuses.</div>';
       }
     } catch (error) {
       entriesList.innerHTML = '<div class="gb-error">Failed to load statuses.</div>';
+    }
+  };
+
+  GuestbookWidget.prototype.loadMoreEntries = async function() {
+    if (!this.nextCursor) return;
+    var loadBtn = this.container.querySelector('.gb-load-more-btn');
+    if (loadBtn) {
+      loadBtn.disabled = true;
+      loadBtn.textContent = 'Loading...';
+    }
+    try {
+      var result = await this.fetchEntriesPage(this.nextCursor);
+      if (result && result.success && result.entries && result.entries.length > 0) {
+        this.appendEntryArticles(result.entries);
+      }
+      if (result && result.success) {
+        this.nextCursor = result.nextCursor != null ? result.nextCursor : null;
+        this.setLoadMoreVisible(!!this.nextCursor);
+      }
+    } catch (e) {
+      // keep button for retry
+    }
+    if (loadBtn) {
+      loadBtn.disabled = false;
+      loadBtn.textContent = 'Load more';
     }
   };
 
@@ -1987,6 +2048,16 @@ function getClientScript(env, requestUrl) {
   const style = document.createElement('style');
   style.textContent = \`
     .gb-widget { font-family: inherit; color: inherit; }
+    .gb-load-more-btn {
+      cursor: pointer;
+      font: inherit;
+      padding: 0.4rem 0.9rem;
+      border-radius: 0.375rem;
+      border: 1px solid rgba(0,0,0,0.15);
+      background: rgba(0,0,0,0.04);
+      color: inherit;
+    }
+    .gb-load-more-btn:disabled { cursor: not-allowed; opacity: 0.7; }
   \`;
   document.head.appendChild(style);
 
@@ -2187,7 +2258,7 @@ export default {
 
       // Public API: entries (read-only, serves pre-rendered HTML for load-more)
       if (path === '/api/entries') {
-        const limit = 20;
+        const limit = ENTRIES_PAGE_LIMIT;
         const cursor = url.searchParams.get('cursor');
 
         let query = 'SELECT id, status, created_at FROM entries';
@@ -2599,8 +2670,8 @@ export default {
       // Index page
       if (path === '/') {
         const entries = await env.DB.prepare(
-          'SELECT id, status, created_at FROM entries ORDER BY id DESC LIMIT 20'
-        ).all();
+          'SELECT id, status, created_at FROM entries ORDER BY id DESC LIMIT ?'
+        ).bind(ENTRIES_PAGE_LIMIT).all();
         
         return new Response(getIndexHTML(entries.results || [], config, url.hostname), {
           headers: {
