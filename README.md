@@ -39,6 +39,10 @@ This project is based on the MyGB Cloudflare Worker flow. **Use the original set
 
 Ignore the manual DB initialization section from the previous tutorial for this version. Just create the D1 database and bind it as `DB`. This Worker initializes the required tables automatically on first load.
 
+### Embedded stream (`/client.js`): pagination
+
+The widget loads the first page with `GET /api/entries` (up to **10** entries, newest first). If the API returns `nextCursor`, a **Load more** button appears; each click fetches `GET /api/entries?cursor=<id>` and appends rows until there are no more pages (same contract as the home page Load More).
+
 ### Styling the embedded stream (`/client.js`)
 
 The embed injects markup under your `[data-gb]` container. Add CSS **on the site that embeds the widget**.
@@ -55,6 +59,8 @@ The embed injects markup under your `[data-gb]` container. Add CSS **on the site
 | `.gb-loading` | Shown while fetching |
 | `.gb-no-entries` | Shown when there are no posts |
 | `.gb-error` | Shown when the API request fails |
+| `.gb-load-more-wrap` | Wrapper for the Load more control (hidden when there is no next page) |
+| `.gb-load-more-btn` | Load more button |
 
 Example CSS snippet:
 
