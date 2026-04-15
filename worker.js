@@ -1,6 +1,6 @@
 // MyStatus adapted from MyGB: https://github.com/verfasor/MyGB
 // Thanks Sylvia for ideas and initial fork https://departure.blog/
-// Worker.js v1.0.3b
+// Worker.js v1.0.3c
 
 // Session management
 const SESSION_COOKIE_NAME = 'gb_session';
@@ -2941,7 +2941,7 @@ export default {
       // Admin pages
       if (path.startsWith('/admin')) {
         const username = await verifySession(request, env);
-        if (!username) return Response.redirect(new URL('/login', request.url), 302);
+        if (!username) return Response.redirect(new URL('/login', request.url).toString(), 302);
 
         // Admin page (entries)
         if (path === '/admin/entries') {
@@ -3023,8 +3023,11 @@ export default {
         });
       }
 
-      // Public data export (JSON)
+      // Protected data export (JSON)
       if (path === '/data.json') {
+        const username = await verifySession(request, env);
+        if (!username) return Response.redirect(new URL('/login', request.url).toString(), 302);
+
         const entries = await env.DB.prepare(
           'SELECT id, status, created_at FROM entries ORDER BY created_at DESC'
           
@@ -3038,14 +3041,16 @@ export default {
         return new Response(JSON.stringify(results, null, 2), {
           headers: {
             'Content-Type': 'application/json',
-            'Access-Control-Allow-Origin': '*',
-            'Cache-Control': 'public, max-age=60'
+            'Cache-Control': 'private, no-store'
           }
         });
       }
 
-      // Public data export (CSV)
+      // Protected data export (CSV)
       if (path === '/data.csv') {
+        const username = await verifySession(request, env);
+        if (!username) return Response.redirect(new URL('/login', request.url).toString(), 302);
+
         const entries = await env.DB.prepare(
           'SELECT id, status, created_at FROM entries ORDER BY created_at DESC'
           
@@ -3073,8 +3078,7 @@ export default {
           headers: {
             'Content-Type': 'text/csv; charset=utf-8',
             'Content-Disposition': 'attachment; filename="status-data.csv"',
-            'Access-Control-Allow-Origin': '*',
-            'Cache-Control': 'public, max-age=60'
+            'Cache-Control': 'private, no-store'
           }
         });
       }
