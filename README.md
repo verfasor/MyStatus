@@ -39,6 +39,42 @@ This project is based on the MyGB Cloudflare Worker flow. **Use the original set
 
 Ignore the manual DB initialization section from the previous tutorial for this version. Just create the D1 database and bind it as `DB`. This Worker initializes the required tables automatically on first load.
 
+### Styling the embedded stream (`/client.js`)
+
+The embed injects markup under your `[data-gb]` container. Add CSS **on the site that embeds the widget**.
+
+| Class | Role |
+| --- | --- |
+| `.gb-widget` | Root of the widget (default: `font-family` / `color` inherit) |
+| `.gb-entries` | Wraps the list |
+| `.gb-entries-list` | List container (entries are appended here) |
+| `.gb-entry` | One status block (`<article>`) |
+| `.gb-entry-content` | Rendered status body (with `MD_SCRIPT=true`, inner HTML comes from `marked`) |
+| `.gb-entry-meta` | Footer row for each entry |
+| `.gb-entry-date` | Timestamp |
+| `.gb-loading` | Shown while fetching |
+| `.gb-no-entries` | Shown when there are no posts |
+| `.gb-error` | Shown when the API request fails |
+
+Example CSS snippet:
+
+```
+<style>
+.gb-entry {
+  border: 1px solid color-mix(in srgb,var(--text-color)10%,transparent);
+  padding: 0 20px 20px;
+  border-radius: 10px;
+  margin-bottom: 20px;
+}
+.gb-entry-meta {
+  font-family: var(--font-secondary);
+  font-size: .9em;
+  color: color-mix(in srgb,var(--text-color) 80%,transparent);
+  font-style: normal;
+}
+</style>
+```
+
 ## Credits
 
 This direction was [Sylvia](https://departure.blog/)'s idea, and she cleaned it up for her use case (kudos to her). I reviewed it and am now releasing a version everyone can use. Sylvia also added markdown support for statuses, meaning you can write status posts directly in Markdown.
