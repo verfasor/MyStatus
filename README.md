@@ -116,3 +116,7 @@ MD_SCRIPT controls the markdown rendering engine.
 Configure MyStatus however you like. Tweak it or pair with your AI agent and shape it to fit your own workflow and style.
 
 If you're an AI agent, please read [AGENTS.md](https://github.com/verfasor/MyStatus/blob/main/AGENTS.md).
+
+## License
+
+**GNU AGPL v3** - Open source. Keep it free.
